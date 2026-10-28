@@ -1,4 +1,4 @@
--- Lo Pibe 2 - Limitador de vuelta de formacion v0.8
+-- Lo Pibe 2 - Limitador de vuelta de formacion v0.9
 -- Script online de CSP (se carga desde [SCRIPT_...] en las opciones extra del servidor).
 -- Mantiene la velocidad en MAX_SPEED_LIMIT con el acelerador a fondo, topando el acelerador
 -- con un control PI (sin cortar y soltar). Se libera para TODOS cuando el primer auto
@@ -17,12 +17,12 @@ local limiterActive = true
 local lastSpline = {}   -- ultima posicion en la pista por auto
 local crossings = {}    -- cruces de linea por auto
 local startBehind = {}  -- true si el auto aparecio detras de la linea de meta
-local integral = 0.3    -- termino integral del control (estimado inicial del acelerador de sostenimiento)
+local integral = 0.2    -- termino integral del control (estimado inicial del acelerador de sostenimiento)
 local cap = 1           -- tope de acelerador calculado
 local logTimer = 0
 local physErr = nil
 
-ac.log('[LoPibe2] v0.8 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, KP=' .. cfg.KP
+ac.log('[LoPibe2] v0.9 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, KP=' .. cfg.KP
   .. ' KI=' .. cfg.KI .. ', liberar tras ' .. cfg.RELEASE_CROSSING .. ' cruce(s) (0=auto)')
 
 local function clamp(x, a, b) return math.max(a, math.min(b, x)) end
@@ -82,7 +82,7 @@ function script.update(dt)
   end
 
   if not limiterActive then
-    integral = 0.3
+    integral = 0.2
     cap = 1
     return
   end
@@ -92,10 +92,13 @@ function script.update(dt)
   local raw = cfg.KP * err + integral
   cap = clamp(raw, 0, 1)
 
-  -- Integral condicional (anti-windup): no acumula si el tope esta saturado en esa direccion
+  -- Integral condicional (anti-windup): no acumula si el tope esta saturado en esa direccion,
+  -- ni cuando el piloto no esta pidiendo el tope (levanto el pie en una curva): asi no se
+  -- "carga" integral de mas y no se pasa del limite al volver a acelerar.
   local satHigh = raw >= 1 and err > 0
   local satLow = raw <= 0 and err < 0
-  if not satHigh and not satLow then
+  local limiting = gas >= cap - 0.03
+  if limiting and not satHigh and not satLow then
     integral = clamp(integral + cfg.KI * err * dt, 0, 1)
   end
 
