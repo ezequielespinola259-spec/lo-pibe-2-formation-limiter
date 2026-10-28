@@ -1,4 +1,4 @@
--- Lo Pibe 2 - Limitador de vuelta de formacion v0.6 (diagnostico)
+-- Lo Pibe 2 - Limitador de vuelta de formacion v0.7
 -- Script online de CSP (se carga desde [SCRIPT_...] en las opciones extra del servidor).
 -- Frena al auto local cuando pasa MAX_SPEED_LIMIT y lo libera para TODOS cuando
 -- el primer auto cruza la linea RELEASE_CROSSING veces.
@@ -7,17 +7,18 @@ local cfg = ac.INIConfig.onlineExtras():mapSection('EXTRA_TWEAKS', {
   MAX_SPEED_LIMIT  = 85,   -- km/h: arriba de esto se frena
   BRAKE_TO         = 83,   -- km/h: por debajo de esto se suelta el freno
   BRAKE_FORCE      = 0.3,  -- 0..1
-  RELEASE_CROSSING = 1,    -- cruces de linea del lider para liberar (probar 2 si libera apenas arranca)
+  RELEASE_CROSSING = 0,    -- cruces de linea para liberar; 0 = automatico (2 si el auto arranca detras de la linea, 1 si no)
 })
 
 local limiterActive = true
 local braking = false
 local lastSpline = {}   -- ultima posicion en la pista por auto
 local crossings = {}    -- cruces de linea por auto
+local startBehind = {}  -- true si el auto aparecio detras de la linea de meta
 local logTimer = 0
 local physErr = nil
 
-ac.log('[LoPibe2] v0.6 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, soltar en ' .. cfg.BRAKE_TO
+ac.log('[LoPibe2] v0.7 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, soltar en ' .. cfg.BRAKE_TO
   .. ', fuerza ' .. cfg.BRAKE_FORCE .. ', liberar tras ' .. cfg.RELEASE_CROSSING .. ' cruce(s)')
 
 local function applyBrake()
@@ -42,10 +43,17 @@ function script.update(dt)
     if c and c.isConnected then
       local s = c.splinePosition
       local last = lastSpline[i]
+      if last == nil then
+        startBehind[i] = s > 0.9
+        ac.log('[LoPibe2] auto ' .. i .. ' visto por primera vez en spline=' .. string.format('%.3f', s)
+          .. ' detras_de_linea=' .. tostring(startBehind[i]))
+      end
       if last and last > 0.9 and s < 0.1 then
         crossings[i] = (crossings[i] or 0) + 1
-        ac.log('[LoPibe2] auto ' .. i .. ' cruzo la linea, cruces=' .. crossings[i])
-        if limiterActive and crossings[i] >= cfg.RELEASE_CROSSING then
+        local need = cfg.RELEASE_CROSSING
+        if need <= 0 then need = startBehind[i] and 2 or 1 end
+        ac.log('[LoPibe2] auto ' .. i .. ' cruzo la linea, cruces=' .. crossings[i] .. ' de ' .. need)
+        if limiterActive and crossings[i] >= need then
           limiterActive = false
           braking = false
           ac.log('[LoPibe2] LIMITADOR LIBERADO por auto ' .. i)
