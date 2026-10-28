@@ -1,35 +1,37 @@
--- Lo Pibe 2 - Limitador de vuelta de formacion v0.7
+-- Lo Pibe 2 - Limitador de vuelta de formacion v0.8
 -- Script online de CSP (se carga desde [SCRIPT_...] en las opciones extra del servidor).
--- Frena al auto local cuando pasa MAX_SPEED_LIMIT y lo libera para TODOS cuando
--- el primer auto cruza la linea RELEASE_CROSSING veces.
+-- Mantiene la velocidad en MAX_SPEED_LIMIT con el acelerador a fondo, topando el acelerador
+-- con un control PI (sin cortar y soltar). Se libera para TODOS cuando el primer auto
+-- completa la vuelta de formacion.
 
 local cfg = ac.INIConfig.onlineExtras():mapSection('EXTRA_TWEAKS', {
-  MAX_SPEED_LIMIT  = 85,   -- km/h: arriba de esto se frena
-  BRAKE_TO         = 83,   -- km/h: por debajo de esto se suelta el freno
-  BRAKE_FORCE      = 0.3,  -- 0..1
-  RELEASE_CROSSING = 0,    -- cruces de linea para liberar; 0 = automatico (2 si el auto arranca detras de la linea, 1 si no)
+  MAX_SPEED_LIMIT  = 85,   -- km/h objetivo
+  BRAKE_FORCE      = 0.3,  -- freno de emergencia (solo si se pasa por mucho, ej. bajada)
+  OVERSPEED_BRAKE  = 6,    -- km/h por encima del limite para activar el freno de emergencia
+  KP               = 0.12, -- ganancia proporcional (acelerador por cada km/h de error)
+  KI               = 0.08, -- ganancia integral
+  RELEASE_CROSSING = 0,    -- cruces para liberar; 0 = automatico (2 si arranca detras de la linea, 1 si no)
 })
 
 local limiterActive = true
-local braking = false
 local lastSpline = {}   -- ultima posicion en la pista por auto
 local crossings = {}    -- cruces de linea por auto
 local startBehind = {}  -- true si el auto aparecio detras de la linea de meta
+local integral = 0.3    -- termino integral del control (estimado inicial del acelerador de sostenimiento)
+local cap = 1           -- tope de acelerador calculado
 local logTimer = 0
 local physErr = nil
 
-ac.log('[LoPibe2] v0.7 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, soltar en ' .. cfg.BRAKE_TO
-  .. ', fuerza ' .. cfg.BRAKE_FORCE .. ', liberar tras ' .. cfg.RELEASE_CROSSING .. ' cruce(s)')
+ac.log('[LoPibe2] v0.8 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, KP=' .. cfg.KP
+  .. ' KI=' .. cfg.KI .. ', liberar tras ' .. cfg.RELEASE_CROSSING .. ' cruce(s) (0=auto)')
 
-local function applyBrake()
-  local ok, err = pcall(function()
-    physics.forceUserClutchFor(0.1, 0)
-    physics.forceUserBrakesFor(0.1, cfg.BRAKE_FORCE)
-    physics.forceUserThrottleFor(0.1, 0)
-  end)
+local function clamp(x, a, b) return math.max(a, math.min(b, x)) end
+
+local function safe(fn)
+  local ok, err = pcall(fn)
   if not ok and err ~= physErr then
     physErr = err
-    ac.log('[LoPibe2] ERROR en physics.forceUser*For: ' .. tostring(err))
+    ac.log('[LoPibe2] ERROR en physics.*: ' .. tostring(err))
   end
   return ok
 end
@@ -55,7 +57,6 @@ function script.update(dt)
         ac.log('[LoPibe2] auto ' .. i .. ' cruzo la linea, cruces=' .. crossings[i] .. ' de ' .. need)
         if limiterActive and crossings[i] >= need then
           limiterActive = false
-          braking = false
           ac.log('[LoPibe2] LIMITADOR LIBERADO por auto ' .. i)
         end
       end
@@ -66,33 +67,48 @@ function script.update(dt)
   local me = ac.getCar(sim.focusedCar)
   if not me then return end
   local speed = me.speedKmh
+  local gas = me.gas or 1
 
   ac.debug('LoPibe2 limite activo', limiterActive and 'SI' or 'NO')
   ac.debug('LoPibe2 velocidad', speed)
-  ac.debug('LoPibe2 frenando', braking and 'SI' or 'NO')
+  ac.debug('LoPibe2 tope acelerador', cap)
+  ac.debug('LoPibe2 gas leido', gas)
 
-  -- Diagnostico periodico
   logTimer = logTimer + dt
   if logTimer > 2 then
     logTimer = 0
-    ac.log(string.format('[LoPibe2] auto=%d v=%.1f activo=%s frenando=%s spline=%.3f',
-      sim.focusedCar, speed, tostring(limiterActive), tostring(braking), me.splinePosition))
+    ac.log(string.format('[LoPibe2] v=%.1f activo=%s cap=%.2f integral=%.2f gas=%.2f spline=%.3f',
+      speed, tostring(limiterActive), cap, integral, gas, me.splinePosition))
   end
 
-  if not limiterActive then return end
-
-  if speed > cfg.MAX_SPEED_LIMIT then
-    if not braking then ac.log(string.format('[LoPibe2] EMPIEZA A FRENAR a %.1f km/h', speed)) end
-    braking = true
-  elseif speed < cfg.BRAKE_TO then
-    if braking then ac.log(string.format('[LoPibe2] SUELTA FRENO a %.1f km/h', speed)) end
-    braking = false
+  if not limiterActive then
+    integral = 0.3
+    cap = 1
+    return
   end
 
-  if braking then
-    applyBrake()
+  -- Control PI sobre la velocidad: calcula el tope de acelerador que sostiene el limite
+  local err = cfg.MAX_SPEED_LIMIT - speed
+  local raw = cfg.KP * err + integral
+  cap = clamp(raw, 0, 1)
+
+  -- Integral condicional (anti-windup): no acumula si el tope esta saturado en esa direccion
+  local satHigh = raw >= 1 and err > 0
+  local satLow = raw <= 0 and err < 0
+  if not satHigh and not satLow then
+    integral = clamp(integral + cfg.KI * err * dt, 0, 1)
+  end
+
+  -- Solo se topa si el piloto pide mas acelerador que el tope
+  if gas > cap then
+    safe(function() physics.forceUserThrottleFor(0.1, cap) end)
     pcall(ac.setMessage,
       'LIMITADOR DE FORMACION: ' .. cfg.MAX_SPEED_LIMIT .. ' km/h',
       'Se desactiva cuando el lider cruza la meta')
+  end
+
+  -- Freno de emergencia solo si se pasa por mucho (ej. bajada)
+  if speed > cfg.MAX_SPEED_LIMIT + cfg.OVERSPEED_BRAKE then
+    safe(function() physics.forceUserBrakesFor(0.1, cfg.BRAKE_FORCE) end)
   end
 end
