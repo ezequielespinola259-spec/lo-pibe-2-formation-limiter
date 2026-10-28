@@ -3,6 +3,7 @@
 -- Assetto Corsa + CSP + KissMyRank
 -- Limite durante la vuelta de formacion: 145 km/h
 -- El limitador se libera al cruzar la linea de largada.
+ac.log("FORMATION LIMITER: SCRIPT CARGADO")
 
 local MAX_SPEED_LIMIT = 145
 local BRAKE_TO = 140
