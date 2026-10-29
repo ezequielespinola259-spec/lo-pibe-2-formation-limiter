@@ -1,4 +1,4 @@
--- Lo Pibe 2 - Limitador de vuelta de formacion v0.9
+-- Lo Pibe 2 - Limitador de vuelta de formacion v1.0
 -- Script online de CSP (se carga desde [SCRIPT_...] en las opciones extra del servidor).
 -- Mantiene la velocidad en MAX_SPEED_LIMIT con el acelerador a fondo, topando el acelerador
 -- con un control PI (sin cortar y soltar). Se libera para TODOS cuando el primer auto
@@ -11,6 +11,7 @@ local cfg = ac.INIConfig.onlineExtras():mapSection('EXTRA_TWEAKS', {
   KP               = 0.12, -- ganancia proporcional (acelerador por cada km/h de error)
   KI               = 0.08, -- ganancia integral
   RELEASE_CROSSING = 0,    -- cruces para liberar; 0 = automatico (2 si arranca detras de la linea, 1 si no)
+  ONLY_RACE        = 1,    -- 1 = el limitador solo actua en sesion de carrera (0 = en todas)
 })
 
 local limiterActive = true
@@ -20,12 +21,26 @@ local startBehind = {}  -- true si el auto aparecio detras de la linea de meta
 local integral = 0.2    -- termino integral del control (estimado inicial del acelerador de sostenimiento)
 local cap = 1           -- tope de acelerador calculado
 local logTimer = 0
+local lastSession = nil
+local raceNow = true
 local physErr = nil
 
-ac.log('[LoPibe2] v0.9 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, KP=' .. cfg.KP
+ac.log('[LoPibe2] v1.0 cargado: limite ' .. cfg.MAX_SPEED_LIMIT .. ' km/h, KP=' .. cfg.KP
   .. ' KI=' .. cfg.KI .. ', liberar tras ' .. cfg.RELEASE_CROSSING .. ' cruce(s) (0=auto)')
 
 local function clamp(x, a, b) return math.max(a, math.min(b, x)) end
+
+-- Devuelve true si la sesion actual es carrera. Si no se puede saber, devuelve true
+-- (mejor limitar de mas que dejar sin limitador).
+local function sessionIsRace(sim)
+  local ok, res = pcall(function()
+    return ac.getSession(sim.currentSessionIndex).type == ac.SessionType.Race
+  end)
+  if ok and res ~= nil then return res end
+  local ok2, res2 = pcall(function() return sim.raceSessionType == ac.SessionType.Race end)
+  if ok2 and res2 ~= nil then return res2 end
+  return true
+end
 
 local function safe(fn)
   local ok, err = pcall(fn)
@@ -38,6 +53,20 @@ end
 
 function script.update(dt)
   local sim = ac.getSim()
+
+  -- Cambio de sesion: se reinicia el estado y se decide si el limitador corresponde
+  local sessionIdx = sim.currentSessionIndex
+  if sessionIdx ~= lastSession then
+    lastSession = sessionIdx
+    limiterActive = true
+    integral = 0.2
+    cap = 1
+    lastSpline, crossings, startBehind = {}, {}, {}
+    raceNow = sessionIsRace(sim)
+    local okT, tName = pcall(function() return tostring(ac.getSession(sessionIdx).type) end)
+    ac.log('[LoPibe2] sesion ' .. tostring(sessionIdx) .. ' tipo=' .. (okT and tName or '?')
+      .. ' esCarrera=' .. tostring(raceNow) .. ' ONLY_RACE=' .. tostring(cfg.ONLY_RACE))
+  end
 
   -- Cruces de linea de todos los autos (el lider libera a todos a la vez)
   for i = 0, sim.carsCount - 1 do
@@ -81,7 +110,7 @@ function script.update(dt)
       speed, tostring(limiterActive), cap, integral, gas, me.splinePosition))
   end
 
-  if not limiterActive then
+  if not limiterActive or (cfg.ONLY_RACE == 1 and not raceNow) then
     integral = 0.2
     cap = 1
     return
